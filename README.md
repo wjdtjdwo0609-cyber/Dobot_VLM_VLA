@@ -27,7 +27,7 @@
 
 ## 설계
 
-### 단일 팔 순차 방식
+### 단일 암(리드암 부재시) 순차 방식
 
 SO-100처럼 리더/팔로워가 없으므로 수동으로 팔을 위치시키며 프레임 단위로 수집.
 `[S]` 관측 캡처 -> 팔 이동 -> `[E]` 델타 기록.
@@ -81,13 +81,13 @@ python scripts/01_collect_data.py \
     --save_dir ./dataset_v3
 ```
 
-### 3. 검증
+### 3. 데이터 검증 (v3 형식사용)
 
 ```bash
 python scripts/03_validate_dataset.py --dataset_dir ./dataset_v3 --fix
 ```
 
-### 4. 학습 (Pi0-FAST)
+### 4. 학습 (Pi0-FAST) 예시
 
 ```bash
 # Requires GPU server (A6000+)
@@ -128,7 +128,7 @@ python client/pi0_dobot_client.py \
 
 ---
 
-## 알려진 이슈
+## 이슈
 
 ### 그리퍼 미작동
 
@@ -144,7 +144,7 @@ LeRobot >= 0.5.0 기준. `images/` 디렉토리, `tasks.jsonl`, 상대 경로 �
 
 ---
 
-## 하드웨어
+## 하드웨어 예시
 
 | 구성 | 사양 |
 |------|------|
@@ -154,4 +154,5 @@ LeRobot >= 0.5.0 기준. `images/` 디렉토리, `tasks.jsonl`, 상대 경로 �
 
 ---
 
+## 라이센스 정책
 See [LICENSE](./LICENSE)
