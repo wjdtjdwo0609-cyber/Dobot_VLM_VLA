@@ -2,7 +2,6 @@
 
 **부산 로보틱스 AI 교육 프로그램 -- 단일 로봇 팔 임시학습(Imitation Learning) 파이프라인**
 
-
 ---
 
 ## 구조
@@ -42,26 +41,38 @@ Pi0 출력은 3D 직교좌표 delta. DOBOT 펌웨어가 `move_to(x, y, z, r)`로
 
 ---
 
-## 구조
+## 파일 구조
 
 ```
-dobot-lerobot-pi0/
-+-- LICENSE                          # Proprietary License
-+-- README.md                        # This file
-+-- requirements.txt                 # Python dependencies
-+-- scripts/
-|   +-- 01_collect_data.py           # Step-by-step data collection
-|   +-- 02_convert_v2_to_v3.py       # v2.x -> v3.0 format converter
-|   +-- 03_validate_dataset.py       # Dataset validator with auto-fix
-+-- server/
-|   +-- pi0_server.py                # Pi0/Pi0-FAST HTTP inference server
-|   +-- pi0_ws_server.py             # Pi0/Pi0-FAST WebSocket streaming server
-+-- client/
-|   +-- pi0_dobot_client.py          # HTTP client + LLM chaining
-|   +-- pi0_ws_client.py             # WebSocket streaming client
-+-- docs/
-    +-- PIPELINE.md                  # Full pipeline guide (Pi0 + Pi0-FAST)
+Dobot_VLM_VLA/
+├── README.md
+├── LICENSE
+├── requirements.txt
+├── scripts/
+│   ├── 01_collect_data.py           # 단계별 데이터 수집 (단일 팔 순차 방식)
+│   ├── 02_convert_v2_to_v3.py       # v2.x → v3.0 포맷 변환
+│   ├── 03_validate_dataset.py       # 데이터셋 검증 + 자동 수정
+│   ├── 04_train_pi0.sh              # Pi0-FAST 학습 스크립트
+│   ├── 05_inference_dobot.py        # 로컬 추론 테스트
+│   ├── task_normalizer.py           # 태스크 정규화 유틸
+│   └── test_dobot.py               # DOBOT 연결 테스트
+├── server/
+│   ├── pi0_server.py                # Pi0-FAST HTTP 추론 서버 (GPU)
+│   └── pi0_ws_server.py             # WebSocket 스트리밍 서버
+├── client/
+│   ├── pi0_dobot_client.py          # HTTP 클라이언트 + LLM 체이닝
+│   ├── pi0_ws_client.py             # WebSocket 스트리밍 클라이언트
+│   ├── pi0_voice_client.py          # 음성 명령 클라이언트
+│   ├── voice_module.py              # 음성 인식 모듈
+│   └── chatbot_module.py            # 챗봇 모듈
+└── docs/
+    ├── PIPELINE.md                  # 전체 파이프라인 가이드
+    ├── architecture_comparison.md   # 아키텍처 비교
+    ├── data_collection_guide.md     # 데이터 수집 가이드
+    └── execution_plan.md            # 실행 계획
 ```
+
+---
 
 ## 사용법
 
@@ -81,6 +92,8 @@ python scripts/01_collect_data.py \
     --save_dir ./dataset_v3
 ```
 
+> 카메라 매핑: `--cam1` = wrist 카메라, `--cam2` = top 카메라
+
 ### 3. 데이터 검증 (v3 형식사용)
 
 ```bash
@@ -90,57 +103,71 @@ python scripts/03_validate_dataset.py --dataset_dir ./dataset_v3 --fix
 ### 4. 학습 (Pi0-FAST) 예시
 
 ```bash
-# Requires GPU server (A6000+)
-pip install -e ".[pi]"
+# GPU 서버 (A6000+)
+bash scripts/04_train_pi0.sh
+```
 
+또는 직접 실행:
+
+```bash
 lerobot-train \
     --dataset.repo_id=local/dataset_v3 \
     --dataset.root=./dataset_v3 \
     --policy.type=pi0_fast \
-    --policy.pretrained_path=lerobot/pi0_fast_base \
+    --policy.pretrained_path=lerobot/pi0fast-base \
     --policy.dtype=bfloat16 \
     --policy.gradient_checkpointing=true \
-    --policy.chunk_size=10 \
+    --policy.chunk_size=5 \
     --policy.n_action_steps=1 \
     --batch_size=4 \
     --steps=100000 \
+    --push_to_hub=false \
     --output_dir=outputs/pi0fast_dobot
 ```
 
 > `n_action_steps=1`: DOBOT의 `move_to(wait=True)`가 ~0.3-1.0초 소요되므로
 > 1 스텝만 실행 후 재관측하는 closed-loop 방식이 안정적.
-> See `docs/PIPELINE.md` for Pi0 (flow-matching) training commands.
 
 ### 5. 추론
 
 ```bash
-# On GPU server (A6000):
-PI0_POLICY_TYPE=pi0_fast \
-PI0_MODEL_PATH=./outputs/pi0fast_dobot/checkpoints/last/pretrained_model \
+# GPU 서버 (A6000):
+PI0_MODEL_PATH=./outputs/pi0fast_dobot_testv2/checkpoints/000100/pretrained_model \
 python server/pi0_server.py
 
-# On local machine with DOBOT:
+# 로컬 (DOBOT 연결):
 python client/pi0_dobot_client.py \
-    --server http://192.168.1.100:8000 \
+    --server http://<서버IP>:8000 \
     --port COM4 \
     --task "pick up the red cup"
 ```
 
+서버 LoRA 로딩 과정:
+1. `lerobot/pi0fast-base` base 모델 로드
+2. 체크포인트에서 LoRA 어댑터 merge
+3. fine-tuned config 적용 (카메라: top + wrist, state: 5차원)
+
+### 6. 음성 명령 모드
+
+```bash
+python client/pi0_voice_client.py \
+    --server http://<서버IP>:8000 \
+    --port COM4
+```
+
 ---
 
-## 이슈
+## 모델 상세
 
-### 그리퍼 미작동
-
-추론 중 그리퍼가 안정적으로 작동하지 않음. `move_to()`와 `grip()` 간 큐 충돌 의심.
-코드 내 `GRIPPER_DELAY_AFTER_MOVE_S` 값 조정으로 대응 가능하나 현장 디버깅 필요.
-
----
-
-## v3.0 포맷
-
-LeRobot >= 0.5.0 기준. `images/` 디렉토리, `tasks.jsonl`, 상대 경로 사용.
-대규모 데이터셋은 `dataset.finalize()`로 multi-episode shard 통합 가능.
+| 항목 | 값 |
+|------|-----|
+| 모델 | Pi0-FAST (autoregressive + FAST tokenizer) |
+| base 모델 | `lerobot/pi0fast-base` (PaliGemma-3B + Gemma-300M) |
+| fine-tuning | LoRA adapter |
+| 입력 이미지 | top + wrist 카메라 (480x640 → 224x224 자동 리사이즈) |
+| 입력 state | `[x, y, z, r, gripper]` 5차원 (MEAN_STD 정규화) |
+| 출력 action | `[Δx, Δy, Δz, Δr, grip]` 5차원 (delta) |
+| chunk_size | 5 |
 
 ---
 
@@ -149,7 +176,7 @@ LeRobot >= 0.5.0 기준. `images/` 디렉토리, `tasks.jsonl`, 상대 경로 �
 | 구성 | 사양 |
 |------|------|
 | 로봇 | DOBOT Magician (USB, CH340/CP210x) |
-| 카메라 | USB 카메라 2대 (top + wrist), 640x480 |
+| 카메라 | USB 카메라 2대 (cam1=wrist, cam2=top), 640x480 |
 | 학습 GPU | A6000+ (48GB VRAM) |
 
 ---
