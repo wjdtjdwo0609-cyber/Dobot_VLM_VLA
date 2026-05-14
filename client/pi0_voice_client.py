@@ -171,8 +171,8 @@ def main():
 
     # DOBOT
     parser.add_argument("--port", type=str, default=None, help="DOBOT 시리얼 포트")
-    parser.add_argument("--cam1", type=int, default=1, help="Top 카메라 ID")
-    parser.add_argument("--cam2", type=int, default=2, help="Front 카메라 ID")
+    parser.add_argument("--cam1", type=int, default=1, help="Wrist 카메라 ID (데이터 수집과 동일)")
+    parser.add_argument("--cam2", type=int, default=2, help="Top 카메라 ID (데이터 수집과 동일)")
 
     # Pi0
     parser.add_argument("--chunk-size", type=int, default=2, help="Pi0 액션 청크 스텝 수")

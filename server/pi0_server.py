@@ -1,112 +1,72 @@
 #!/usr/bin/env python3
 """
-Pi0/Pi0-FAST HTTP 추론 서버
+Pi0/Pi0-FAST HTTP 추론 서버.
 
-이미지 + state + 언어 명령 수신, delta actions 반환.
+FastAPI transport만 이 파일에 두고, 모델 로딩/정규화/추론은
+``dobot_vla.infrastructure.pi0_runtime``으로 분리했습니다.
 
-    python pi0_server.py
-    curl http://localhost:8000/health
+    PI0_MODEL_PATH=./outputs/pi0fast_dobot/checkpoints/last/pretrained_model \
+    python server/pi0_server.py
 """
 
-import os
-import time
+from __future__ import annotations
+
 import json
-import base64
 import logging
-import tempfile
-import numpy as np
+import os
+import sys
 from pathlib import Path
 
-import torch
-import draccus
 import uvicorn
 from fastapi import FastAPI, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel
-from safetensors.torch import load_file
 
-# Configuration -- Update MODEL_PATH and POLICY_TYPE for your setup
+
+PROJECT_ROOT = Path(__file__).resolve().parents[1]
+if str(PROJECT_ROOT) not in sys.path:
+    sys.path.insert(0, str(PROJECT_ROOT))
+
+from dobot_vla.infrastructure.pi0_runtime import Pi0PolicyRuntime, Pi0RuntimeConfig
+
+
 MODEL_PATH = os.environ.get(
     "PI0_MODEL_PATH",
     "./outputs/pi0fast_dobot_testv2/checkpoints/000100/pretrained_model",
 )
-# "pi0" = flow-matching (original), "pi0_fast" = autoregressive FAST tokenizer (5x faster training)
 POLICY_TYPE = os.environ.get("PI0_POLICY_TYPE", "pi0_fast")
-HOST = "0.0.0.0"
-PORT = 8000
-DEVICE = "cuda"
+HOST = os.environ.get("PI0_HOST", "0.0.0.0")
+PORT = int(os.environ.get("PI0_PORT", "8000"))
+DEVICE = os.environ.get("PI0_DEVICE", "cuda")
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s [%(levelname)s] %(message)s")
 logger = logging.getLogger("pi0_server")
 
-# FastAPI
-app = FastAPI(title="Pi0 Inference Server", version="1.0")
+app = FastAPI(title="Pi0 Inference Server", version="1.1")
 app.add_middleware(
-    CORSMiddleware, allow_origins=["*"], allow_methods=["*"], allow_headers=["*"],
+    CORSMiddleware,
+    allow_origins=["*"],
+    allow_methods=["*"],
+    allow_headers=["*"],
 )
 
-policy = None
-normalizer = None
-paligemma_tokenizer = None
-tokenizer_max_length = None
+runtime = Pi0PolicyRuntime(
+    Pi0RuntimeConfig(model_path=MODEL_PATH, policy_type=POLICY_TYPE, device=DEVICE),
+    logger=logger,
+)
 
 
-# Normalization
-class ModelNormalizer:
-    def __init__(self, model_path):
-        logger.info(f"정규화 통계 로드: {model_path}")
-
-        import glob
-
-        # Input normalization — glob으로 자동 검색
-        pre_files = sorted(glob.glob(os.path.join(model_path, "policy_preprocessor_step_*_normalizer_processor.safetensors")))
-        if pre_files:
-            data = load_file(pre_files[0])
-            self.state_mean = data["observation.state.mean"].numpy()
-            self.state_std = data["observation.state.std"].numpy()
-            self.state_std = np.where(self.state_std < 1e-6, 1.0, self.state_std)
-            logger.info(f"   preprocessor: {os.path.basename(pre_files[0])}")
-            logger.info(f"   state mean: {self.state_mean}")
-            logger.info(f"   state std:  {self.state_std}")
-        else:
-            logger.warning("   preprocessor 없음")
-            self.state_mean = np.zeros(5)
-            self.state_std = np.ones(5)
-
-        # 출력 역정규화 — glob으로 자동 검색
-        post_files = sorted(glob.glob(os.path.join(model_path, "policy_postprocessor_step_*_unnormalizer_processor.safetensors")))
-        if post_files:
-            data = load_file(post_files[0])
-            self.action_mean = data["action.mean"].numpy()
-            self.action_std = data["action.std"].numpy()
-            self.action_std = np.where(self.action_std < 1e-6, 1.0, self.action_std)
-            logger.info(f"   postprocessor: {os.path.basename(post_files[0])}")
-            logger.info(f"   action mean: {self.action_mean}")
-            logger.info(f"   action std:  {self.action_std}")
-        else:
-            logger.warning("   postprocessor 없음")
-            self.action_mean = np.zeros(5)
-            self.action_std = np.ones(5)
-
-    def normalize_state(self, raw):
-        return (np.array(raw, dtype=np.float32) - self.state_mean) / self.state_std
-
-    def unnormalize_action(self, norm):
-        return norm * self.action_std + self.action_mean
-
-
-# 요청 / 응답
 class InferenceRequest(BaseModel):
-    image_top: str           # base64 JPEG
-    image_wrist: str         # base64 JPEG
-    state: list[float]       # [x, y, z, r, gripper] raw
+    image_top: str
+    image_wrist: str
+    state: list[float]
     language_instruction: str = ""
-    chunk_size: int = 2      # 사용할 액션 스텝 수 (1~50)
+    chunk_size: int = 2
 
 
 class InferenceResponse(BaseModel):
-    actions: list[list[float]]  # chunk_size × 5 (역정규화된 real delta)
-    raw_actions: list[float]    # 첫 스텝 raw 출력 (디버깅)
+    actions: list[list[float]]
+    raw_actions: list[float]
     inference_time_ms: float
 
 
@@ -119,171 +79,56 @@ class HealthResponse(BaseModel):
     gpu_memory_total_gb: float
 
 
-# 유틸
-def decode_b64_image(b64: str) -> np.ndarray:
-    import cv2
-    buf = np.frombuffer(base64.b64decode(b64), dtype=np.uint8)
-    img = cv2.imdecode(buf, cv2.IMREAD_COLOR)
-    if img is None:
-        raise ValueError("이미지 디코딩 실패")
-    return cv2.cvtColor(img, cv2.COLOR_BGR2RGB)  # HWC, RGB, uint8
-
-
-def img_to_tensor(img: np.ndarray) -> torch.Tensor:
-    """[H,W,3] uint8 -> [1,3,H,W] float32 0~1"""
-    return (
-        torch.from_numpy(img).permute(2, 0, 1).float().div(255.0)
-        .unsqueeze(0).to(DEVICE)
-    )
-
-
-def load_ft_config(model_path: str):
-    """fine-tuned config.json 로드 (draccus 호환)"""
-    from lerobot.policies.pi0_fast.configuration_pi0_fast import PI0FastConfig
-
-    with open(Path(model_path) / "config.json") as f:
-        cfg_data = json.load(f)
-    cfg_data.pop("type", None)
-
-    with tempfile.NamedTemporaryFile("w+", delete=False, suffix=".json") as f:
-        json.dump(cfg_data, f)
-        tmpf = f.name
-
-    with draccus.config_type("json"):
-        return draccus.parse(PI0FastConfig, tmpf, args=[])
-
-
-# 모델 로드
 @app.on_event("startup")
 def startup_load_model():
-    global policy, normalizer, paligemma_tokenizer, tokenizer_max_length
-
-    logger.info(f"Loading {POLICY_TYPE} model: {MODEL_PATH}")
-    t0 = time.time()
-
-    if POLICY_TYPE == "pi0_fast":
-        from lerobot.policies.pi0_fast.modeling_pi0_fast import PI0FastPolicy
-        from peft import PeftModel
-
-        # 1. base 모델 로드
-        base_policy = PI0FastPolicy.from_pretrained("lerobot/pi0fast-base")
-
-        # 2. 토크나이저 저장 (merge 후 사라지므로)
-        paligemma_tokenizer = base_policy._paligemma_tokenizer
-        tokenizer_max_length = base_policy.config.tokenizer_max_length
-
-        # 3. LoRA 어댑터 로드 + merge
-        policy = PeftModel.from_pretrained(base_policy, MODEL_PATH)
-        policy = policy.merge_and_unload()
-        policy._tokenizer_max_length = tokenizer_max_length
-        policy._paligemma_tokenizer = paligemma_tokenizer
-
-        # 4. fine-tuned config 로드
-        ft_config = load_ft_config(MODEL_PATH)
-        policy.config = ft_config
-        logger.info(f"   Fine-tuned config: cameras={list(ft_config.input_features.keys())}")
-        logger.info("   Policy type: Pi0-FAST (autoregressive + LoRA merged)")
-    else:
-        from lerobot.policies.pi0.modeling_pi0 import PI0Policy
-        policy = PI0Policy.from_pretrained(MODEL_PATH)
-        paligemma_tokenizer = policy._paligemma_tokenizer
-        tokenizer_max_length = policy.config.tokenizer_max_length
-        logger.info("   Policy type: Pi0 (flow-matching)")
-
-    policy.eval()
-    policy.to(DEVICE)
-
-    normalizer = ModelNormalizer(MODEL_PATH)
-
-    dt = time.time() - t0
-    logger.info(f"로드 완료 ({dt:.1f}s)")
-    if torch.cuda.is_available():
-        g = torch.cuda.get_device_properties(0)
-        logger.info(f"{g.name}  {g.total_memory / 1e9:.0f}GB")
+    runtime.load()
 
 
-# 엔드포인트
 @app.get("/health", response_model=HealthResponse)
 def health():
-    gn, mu, mt = "", 0.0, 0.0
-    if torch.cuda.is_available():
-        gn = torch.cuda.get_device_name(0)
-        mu = torch.cuda.memory_allocated(0) / 1e9
-        mt = torch.cuda.get_device_properties(0).total_memory / 1e9
+    data = runtime.health()
     return HealthResponse(
-        status="ok", model_loaded=policy is not None,
-        device=DEVICE, gpu_name=gn,
-        gpu_memory_used_gb=round(mu, 2), gpu_memory_total_gb=round(mt, 2),
+        status=data["status"],
+        model_loaded=data["model_loaded"],
+        device=data["device"],
+        gpu_name=data["gpu_name"],
+        gpu_memory_used_gb=data["gpu_memory_used_gb"],
+        gpu_memory_total_gb=data["gpu_memory_total_gb"],
     )
 
 
 @app.post("/predict", response_model=InferenceResponse)
 def predict(req: InferenceRequest):
-    if policy is None:
-        raise HTTPException(503, "모델 미로드")
-
-    t0 = time.time()
     try:
-        # 1. 이미지
-        img_top = decode_b64_image(req.image_top)
-        img_wrist = decode_b64_image(req.image_wrist)
-
-        # 2. state 정규화
-        norm_state = normalizer.normalize_state(req.state)
-        state_t = torch.tensor(norm_state, dtype=torch.float32).unsqueeze(0).to(DEVICE)
-
-        # 3. observation 딕셔너리 (학습 시 사용한 키 이름과 일치해야 함)
-        observation = {
-            "observation.images.top": img_to_tensor(img_top),
-            "observation.images.wrist": img_to_tensor(img_wrist),
-            "observation.state": state_t,
-        }
-
-        # 4. 언어 명령 토크나이즈
-        lang = req.language_instruction or "pick up the object"
-        tokenized = paligemma_tokenizer(
-            lang,
-            return_tensors="pt",
-            padding="max_length",
-            max_length=tokenizer_max_length,
-            truncation=True,
+        result = runtime.predict(
+            image_top=req.image_top,
+            image_wrist=req.image_wrist,
+            state=req.state,
+            language_instruction=req.language_instruction,
+            chunk_size=req.chunk_size,
         )
-        observation["observation.language.tokens"] = tokenized.input_ids.to(DEVICE)
-        observation["observation.language.attention_mask"] = tokenized.attention_mask.to(DEVICE).bool()
-
-        # 5. 추론
-        with torch.no_grad():
-            action = policy.select_action(observation)
-
-        if isinstance(action, torch.Tensor):
-            action = action.cpu().numpy()
-        if action.ndim == 1:
-            action = action.reshape(1, -1)
-
-        # 6. 역정규화
-        raw_out = action[0].tolist()
-        chunk = min(req.chunk_size, action.shape[0])
-        actions = [normalizer.unnormalize_action(action[i]).tolist() for i in range(chunk)]
-
-        dt_ms = (time.time() - t0) * 1000
+        action0 = result["actions"][0]
         logger.info(
-            f"{dt_ms:.0f}ms | "
-            f"Δ[0]=[{actions[0][0]:+.1f},{actions[0][1]:+.1f},{actions[0][2]:+.1f}] | "
+            f"{result['inference_time_ms']:.0f}ms | "
+            f"Δ[0]=[{action0[0]:+.1f},{action0[1]:+.1f},{action0[2]:+.1f}] | "
             f"\"{req.language_instruction[:25]}\""
         )
-        return InferenceResponse(actions=actions, raw_actions=raw_out, inference_time_ms=round(dt_ms, 1))
+        return InferenceResponse(**result)
+    except RuntimeError as exc:
+        raise HTTPException(503, str(exc)) from exc
+    except Exception as exc:
+        logger.error(f"{exc}")
+        import traceback
 
-    except Exception as e:
-        logger.error(f"{e}")
-        import traceback; traceback.print_exc()
-        raise HTTPException(500, str(e))
+        traceback.print_exc()
+        raise HTTPException(500, str(exc)) from exc
 
 
 @app.get("/model_info")
 def model_info():
-    p = Path(MODEL_PATH) / "config.json"
-    if p.exists():
-        with open(p) as f:
+    config_path = Path(MODEL_PATH) / "config.json"
+    if config_path.exists():
+        with open(config_path) as f:
             return json.load(f)
     return {"error": "not found"}
 

@@ -31,6 +31,23 @@
 └──────────────────────────────────────────────────────┘
 ```
 
+## 코드 모듈 구조 (DDD 적용)
+
+기존 실행 스크립트는 그대로 두되, 새 재사용 코드는 `dobot_vla/` 패키지로 분리한다.
+
+```
+Presentation:   client/*.py, server/*.py, scripts/*.py
+Application:    dobot_vla/application/
+Domain:         dobot_vla/domain/
+Infrastructure: dobot_vla/infrastructure/
+```
+
+- Domain: `RobotPose`, `RobotState`, `DeltaAction`, `SafetyBounds`, `CommandCatalog`
+- Application: closed-loop inference, LLM task planning
+- Infrastructure: DOBOT serial adapter, dual camera adapter, Pi0 HTTP client, Pi0 server runtime
+
+의존성 방향은 `Presentation -> Application -> Domain`이며, 외부 라이브러리(`pydobot`, `cv2`, `torch`, `requests`)는 Infrastructure에 가둔다.
+
 ## 모델 선정
 
 | 역할 | 선정 모델 | 선정 이유 |

@@ -7,9 +7,17 @@ STT 결과(한국어 텍스트) → Qwen 3.0으로 robot/dialog 분류 → 영�
     python chatbot_module.py
 """
 
-import sys
 import json
 import re
+import sys
+from pathlib import Path
+
+
+PROJECT_ROOT = Path(__file__).resolve().parents[1]
+if str(PROJECT_ROOT) not in sys.path:
+    sys.path.insert(0, str(PROJECT_ROOT))
+
+from dobot_vla.domain.tasks import COMMAND_MAP, STOP_KEYWORDS, CommandCatalog
 
 try:
     from transformers import AutoModelForCausalLM, AutoTokenizer
@@ -17,23 +25,6 @@ try:
 except ImportError:
     print("pip install transformers torch")
     sys.exit(1)
-
-# Pi0-FAST 학습 시 사용한 영어 프롬프트 (글자 하나까지 동일해야 함)
-COMMAND_MAP = {
-    "과자":       "pick up the snack and hand it over",
-    "칸초":       "pick up the snack and hand it over",
-    "간식":       "pick up the snack and hand it over",
-    "음료":       "pick up the drink and hand it over",
-    "피크닉":     "pick up the drink and hand it over",
-    "물":         "pick up the drink and hand it over",
-    "연필":       "pick up the pencil and hand it over",
-    "지우개":     "pick up the eraser and hand it over",
-    "휴지":       "pick up the tissue and hand it over",
-    "스트레스":   "pick up the stress ball and hand it over",
-    "스트레스볼": "pick up the stress ball and hand it over",
-}
-
-STOP_KEYWORDS = {"종료", "그만", "멈춰", "스톱", "stop", "끝", "정지"}
 
 SYSTEM_PROMPT = """너는 DOBOT Magician 로봇 팔의 음성 명령 분류기야.
 사용 가능한 물체: 과자, 음료, 연필, 지우개, 휴지, 스트레스볼
@@ -74,6 +65,8 @@ class ChatbotRouter:
                 self.device = "cpu"
         else:
             self.device = device
+
+        self.command_catalog = CommandCatalog()
 
         print(f"  [LLM] 모델 로딩: {model_name} ({self.device})")
         self.tokenizer = AutoTokenizer.from_pretrained(model_name)
@@ -201,22 +194,9 @@ class ChatbotRouter:
             "suggest_object": None,
         }
 
-    @staticmethod
-    def _get_command(object_name: str) -> str | None:
+    def _get_command(self, object_name: str) -> str | None:
         """한국어 물체명 → COMMAND_MAP에서 영어 프롬프트 반환"""
-        if not object_name:
-            return None
-
-        # 정확히 일치
-        if object_name in COMMAND_MAP:
-            return COMMAND_MAP[object_name]
-
-        # 부분 매칭 (예: "스트레스볼" in "스트레스볼 좀")
-        for key, cmd in COMMAND_MAP.items():
-            if key in object_name or object_name in key:
-                return cmd
-
-        return None
+        return self.command_catalog.command_for_object(object_name)
 
 
 # 단독 실행: 키보드 입력 테스트

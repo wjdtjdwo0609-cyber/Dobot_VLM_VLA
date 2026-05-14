@@ -65,12 +65,30 @@ Dobot_VLM_VLA/
 │   ├── pi0_voice_client.py          # 음성 명령 클라이언트
 │   ├── voice_module.py              # 음성 인식 모듈
 │   └── chatbot_module.py            # 챗봇 모듈
+├── dobot_vla/
+│   ├── domain/                       # 순수 도메인 규칙 (pose/action/task)
+│   ├── infrastructure/               # DOBOT, 카메라, Pi0 서버 adapter
+│   └── application/                  # inference/planning use case
 └── docs/
     ├── PIPELINE.md                  # 전체 파이프라인 가이드
     ├── architecture_comparison.md   # 아키텍처 비교
+    ├── ddd_modularization_guide.md  # DDD 모듈화 구현 설명
+    ├── ddd_modularization_plan.md   # DDD 모듈화 계획
+    ├── troubleshooting.md           # 트러블슈팅 모음
     ├── data_collection_guide.md     # 데이터 수집 가이드
     └── execution_plan.md            # 실행 계획
 ```
+
+### 모듈화 구조
+
+새 코드에서는 `dobot_vla` 패키지를 우선 사용합니다.
+
+- `dobot_vla.domain`: 하드웨어와 무관한 pose/action/task 규칙
+- `dobot_vla.infrastructure`: pydobot, OpenCV, HTTP, Pi0 runtime adapter
+- `dobot_vla.application`: 카메라 → Pi0 → DOBOT 실행 흐름
+
+기존 `client/`, `server/`, `scripts/` 파일은 실행용 entry point로 유지합니다.
+자세한 기준은 [DDD 모듈화 계획](docs/ddd_modularization_plan.md)을 참고하세요.
 
 ---
 
