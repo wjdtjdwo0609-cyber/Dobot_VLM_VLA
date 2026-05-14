@@ -48,6 +48,7 @@ Dobot_VLM_VLA/
 ├── README.md
 ├── LICENSE
 ├── requirements.txt
+├── train.sh                         # GPU 서버용 Pi0-FAST 학습 실행 래퍼
 ├── scripts/
 │   ├── 01_collect_data.py           # 단계별 데이터 수집 (단일 팔 순차 방식)
 │   ├── 02_convert_v2_to_v3.py       # v2.x → v3.0 포맷 변환
@@ -71,6 +72,7 @@ Dobot_VLM_VLA/
 │   └── application/                  # inference/planning use case
 └── docs/
     ├── PIPELINE.md                  # 전체 파이프라인 가이드
+    ├── team_guide.md                # 팀원용 복사-붙여넣기 실행 가이드
     ├── architecture_comparison.md   # 아키텍처 비교
     ├── ddd_modularization_guide.md  # DDD 모듈화 구현 설명
     ├── ddd_modularization_plan.md   # DDD 모듈화 계획
@@ -94,70 +96,238 @@ Dobot_VLM_VLA/
 
 ## 사용법
 
-### 1. 설치
+처음 받는 팀원은 이 README를 먼저 보고, 실제 현장에서 그대로 따라 할 때는
+[팀원용 실행 가이드](docs/team_guide.md)를 함께 열어두면 됩니다.
+
+| 목적 | 문서 |
+|---|---|
+| 처음 실행하는 팀원용 전체 절차 | [docs/team_guide.md](docs/team_guide.md) |
+| 데이터 수집만 자세히 보기 | [docs/data_collection_guide.md](docs/data_collection_guide.md) |
+| 서버/학습/추론 파이프라인 상세 | [docs/PIPELINE.md](docs/PIPELINE.md) |
+| 자주 났던 에러와 해결법 | [docs/troubleshooting.md](docs/troubleshooting.md) |
+| DDD 모듈화 구조 설명 | [docs/ddd_modularization_guide.md](docs/ddd_modularization_guide.md) |
+
+### 0. 프로젝트 받기
 
 ```bash
+git clone https://github.com/wjdtjdwo0609-cyber/Dobot_VLM_VLA.git
+cd Dobot_VLM_VLA
+```
+
+### 1. 사전 준비
+
+하드웨어:
+
+- DOBOT Magician 전원 어댑터와 USB 케이블 연결
+- USB 카메라 2대 연결
+- DOBOT 표시등이 초록불인지 확인
+- 데이터 수집/추론 기준 카메라 매핑: `--cam1=wrist`, `--cam2=top`
+
+Python 환경:
+
+```bash
+conda activate lerobot
 pip install -r requirements.txt
 ```
 
-### 2. 데이터 수집
+`ModuleNotFoundError`가 나오면 같은 환경에서 `pip install -r requirements.txt`를 다시 실행하세요.
+
+### 2. 카메라 번호 확인
+
+카메라 번호가 헷갈리면 먼저 아래 명령으로 어떤 번호가 어떤 카메라인지 확인합니다.
 
 ```bash
-# Mac (포트 자동 감지, 또는 --port /dev/tty.usbserial-XXXXX)
+python -c "
+import cv2
+for i in range(5):
+    cap = cv2.VideoCapture(i)
+    if cap.isOpened():
+        ret, frame = cap.read()
+        if ret:
+            print(f'Camera {i}: OK ({frame.shape[1]}x{frame.shape[0]})')
+            cv2.imshow(f'Camera {i}', frame)
+        cap.release()
+cv2.waitKey(3000)
+cv2.destroyAllWindows()
+"
+```
+
+확인한 번호를 데이터 수집/추론 명령의 `--cam1`, `--cam2`에 넣습니다.
+
+### 3. 데이터 수집
+
+```bash
 python scripts/01_collect_data.py \
     --cam1 0 --cam2 1 \
-    --task "pick up the red cup" \
-    --save_dir ./dataset_v3
+    --task "pick up the tissue" \
+    --save_dir ./tissue_dataset_v1
 ```
 
-> 카메라 매핑: `--cam1` = wrist 카메라, `--cam2` = top 카메라
-> 시리얼 포트: Mac은 자동 감지됨. 수동 지정 시 `--port /dev/tty.usbserial-XXXXX`
+수집 프로그램이 켜지면 OpenCV 프리뷰 창을 클릭한 뒤 키를 누릅니다.
 
-### 3. 데이터 검증 (v3 형식사용)
+| 키 | 동작 |
+|---|---|
+| `S` | 현재 카메라 영상과 로봇 위치 캡처 |
+| `E` | 손으로 이동한 뒤 delta action 기록 |
+| `V` | 현재 에피소드 저장 |
+| `D` | 현재 에피소드 버리기 |
+| `W` | 마지막 스텝 되돌리기 |
+| `G` | 그리퍼 ON/OFF |
+| `Q` | 홈 위치로 이동 |
+| `A` | 홈잉/캘리브레이션 |
+| `X` | DOBOT 알람 해제 |
+| `ESC` | 종료 |
+
+한 에피소드는 보통 `S -> 팔 이동 -> E`를 여러 번 반복한 뒤 `V`로 저장합니다.
+물체 하나당 최소 30개 이상의 성공 에피소드를 모으는 것을 권장합니다.
+
+기존 데이터셋에 이어서 수집할 때는 반드시 `--resume`을 붙입니다.
 
 ```bash
-python scripts/03_validate_dataset.py --dataset_dir ./dataset_v3 --fix
+python scripts/01_collect_data.py \
+    --cam1 0 --cam2 1 \
+    --task "pick up the tissue" \
+    --save_dir ./tissue_dataset_v1 \
+    --resume
 ```
 
-### 4. 학습 (Pi0-FAST) 예시
+`--resume` 없이 같은 `--save_dir`를 쓰면 기존 데이터가 새 수집으로 교체될 수 있습니다.
+
+시리얼 포트가 자동 감지되지 않으면 직접 지정합니다.
 
 ```bash
-# bash scripts/04_train_pi0.sh [mac|gpu] [dataset_path]
-
-# Mac (MPS, float32, batch_size=1)
-bash scripts/04_train_pi0.sh mac ./dataset_v4
-
-# GPU 서버 (A6000+, bfloat16, batch_size=4)
-bash scripts/04_train_pi0.sh gpu ./dataset_v4
+python scripts/01_collect_data.py \
+    --port /dev/tty.usbserial-XXXXX \
+    --cam1 0 --cam2 1 \
+    --task "pick up the tissue" \
+    --save_dir ./tissue_dataset_v1
 ```
 
-> `n_action_steps=1`: DOBOT의 `move_to(wait=True)`가 ~0.3-1.0초 소요되므로
-> 1 스텝만 실행 후 재관측하는 closed-loop 방식이 안정적.
-
-### 5. 추론
+### 4. 데이터 검증
 
 ```bash
-# GPU 서버에서 추론 서버 실행:
-PI0_MODEL_PATH=./outputs/pi0fast_dobot_testv2/checkpoints/000100/pretrained_model \
+python scripts/03_validate_dataset.py --dataset_dir ./tissue_dataset_v1 --fix
+```
+
+검증은 학습 전에 반드시 실행합니다. `--fix`는 `tasks.parquet`, `meta/info.json` 등
+복구 가능한 메타데이터 문제를 자동으로 고칩니다.
+
+### 5. 서버로 데이터 보내기
+
+```bash
+scp -r ./tissue_dataset_v1 busan01@[서버IP]:~/snap/snapd-desktop-integration/intel_third_hands/Dobot_VLM_VLA/
+```
+
+예시:
+
+```bash
+scp -r ./tissue_dataset_v1 busan01@192.168.0.100:~/snap/snapd-desktop-integration/intel_third_hands/Dobot_VLM_VLA/
+```
+
+이미지 파일까지 함께 보내야 하므로 `scp -r`로 데이터셋 폴더 전체를 전송합니다.
+
+### 6. 학습 (GPU 서버)
+
+서버에 접속합니다.
+
+```bash
+ssh busan01@[서버IP]
+cd ~/snap/snapd-desktop-integration/intel_third_hands/Dobot_VLM_VLA
+source .venv/bin/activate
+```
+
+빠른 테스트:
+
+```bash
+./train.sh ./tissue_dataset_v1 1 100 outputs/tissue_test
+```
+
+본 학습:
+
+```bash
+./train.sh ./tissue_dataset_v1 1 10000 outputs/tissue_v1
+```
+
+중간에 멈춘 학습을 이어서 실행:
+
+```bash
+./train.sh ./tissue_dataset_v1 1 20000 outputs/tissue_v1 resume
+```
+
+여러 데이터셋을 합쳐서 학습:
+
+```bash
+./train.sh "./tissue_dataset_v1 ./cup_dataset_v1" 1 10000 outputs/multi_v1
+```
+
+인자 의미:
+
+| 인자 | 예시 | 설명 |
+|---|---|---|
+| 데이터셋 경로 | `./tissue_dataset_v1` | 학습할 데이터셋 |
+| GPU 번호 | `1` | `nvidia-smi`로 확인한 GPU 번호 |
+| 학습 스텝 | `10000` | 학습 반복 횟수 |
+| 출력 경로 | `outputs/tissue_v1` | 체크포인트 저장 위치 |
+| resume | `resume` | 같은 출력 경로에서 이어서 학습 |
+
+> `n_action_steps=1`: DOBOT의 `move_to(wait=True)`가 약 0.3~1.0초 걸리므로,
+> 한 스텝만 실행하고 다시 관측하는 closed-loop 방식이 안정적입니다.
+
+### 7. 추론 서버 실행
+
+```bash
+PI0_POLICY_TYPE=pi0_fast \
+PI0_MODEL_PATH=./outputs/tissue_v1/checkpoints/last/pretrained_model \
 python server/pi0_server.py
-
-# Mac 로컬에서 클라이언트 실행 (DOBOT 연결):
-python client/pi0_dobot_client.py \
-    --server http://<서버IP>:8000 \
-    --task "pick up the red cup"
 ```
+
+서버가 켜져 있는지 Mac에서 확인합니다.
+
+```bash
+curl http://[서버IP]:8000/health
+```
+
+`"status":"ok"`가 보이면 준비 완료입니다.
 
 서버 LoRA 로딩 과정:
+
 1. `lerobot/pi0fast-base` base 모델 로드
 2. 체크포인트에서 LoRA 어댑터 merge
 3. fine-tuned config 적용 (카메라: top + wrist, state: 5차원)
 
-### 6. 음성 명령 모드
+### 8. Mac에서 DOBOT 추론 실행
+
+```bash
+python client/pi0_dobot_client.py \
+    --server http://[서버IP]:8000 \
+    --cam1 0 --cam2 1 \
+    --task "pick up the tissue" \
+    --chunk-size 1
+```
+
+추론 클라이언트 키:
+
+| 키 | 동작 |
+|---|---|
+| `SPACE` | 1회 추론 실행 |
+| `A` | 자동 모드 ON/OFF |
+| `H` | 홈 위치로 이동 |
+| `G` | 그리퍼 ON/OFF |
+| `T` | task 변경 |
+| `L` | LLM 체이닝 모드 |
+| `ESC` | 종료 |
+
+처음에는 자동 모드보다 `SPACE`로 한 스텝씩 방향을 확인하는 것이 안전합니다.
+
+### 9. 음성 명령 모드
 
 ```bash
 python client/pi0_voice_client.py \
-    --server http://<서버IP>:8000
+    --server http://[서버IP]:8000
 ```
+
+음성 명령은 STT 결과를 task prompt로 변환한 뒤 같은 Pi0 추론 서버를 호출합니다.
+물체명이나 명령어가 학습 때 사용한 문장과 너무 다르면 성능이 떨어질 수 있습니다.
 
 ---
 
